@@ -8,6 +8,8 @@ export interface DefuddleMetadata {
 	parseTime: number;
 	published: string;
 	author: string;
+	/** Author profile URL extracted from meta tags, schema.org, or DOM links / 从 meta 标签、schema.org 或 DOM 链接提取的作者主页 URL */
+	authorUrl?: string;
 	site: string;
 	schemaOrgData: any;
 	wordCount: number;

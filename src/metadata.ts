@@ -43,7 +43,8 @@ export class MetadataExtractor {
 
 		const siteName = this.getSiteName(schemaOrgData, metaTags);
 		const { title, detectedSiteName } = this.cleanTitle(this.getBestTitle(doc, schemaOrgData, metaTags, domain, siteName), siteName);
-		const author = this.getAuthor(doc, schemaOrgData, metaTags);
+		const authorResult = this.getAuthor(doc, schemaOrgData, metaTags);
+		const author = authorResult.name;
 		// Only use author as site fallback for short single-entity names (personal blogs);
 		// multi-author strings with commas are not suitable as site identifiers.
 		const authorAsSite = author && !author.includes(',') ? author : '';
@@ -57,7 +58,8 @@ export class MetadataExtractor {
 			image: this.getImage(doc, schemaOrgData, metaTags),
 			language: this.getLanguage(doc, schemaOrgData, metaTags),
 			published: this.getPublished(doc, schemaOrgData, metaTags),
-			author,
+			author: authorResult.name,
+			authorUrl: authorResult.url,
 			site,
 			schemaOrgData,
 			wordCount: 0,
@@ -86,10 +88,17 @@ export class MetadataExtractor {
 		return '';
 	}
 
-	private static getAuthor(doc: Document, schemaOrgData: any, metaTags: MetaTagItem[]): string {
+	private static getAuthor(doc: Document, schemaOrgData: any, metaTags: MetaTagItem[]): { name: string; url?: string } {
+		let authorUrl: string | undefined;
 		let authorsString: string | undefined;
 
 		// Meta tags - typically expect a single string, possibly comma-separated
+		// article:author is often a URL; detect and save as authorUrl
+		// article:author 通常是 URL；检测并保存为 authorUrl
+		const articleAuthorMeta = this.getMetaContent(metaTags, "property", "article:author");
+		if (articleAuthorMeta && /^https?:\/\//i.test(articleAuthorMeta.trim())) {
+			authorUrl = articleAuthorMeta.trim();
+		}
 		authorsString = this.firstValid([
 			() => this.getMetaContent(metaTags, "name", "sailthru.author"),
 			() => this.getMetaContent(metaTags, "property", "article:author"),
@@ -99,8 +108,14 @@ export class MetadataExtractor {
 			() => this.getMetaContent(metaTags, "name", "authorList"),
 		]);
 		if (authorsString) {
-			const cleaned = this.cleanAuthorString(authorsString);
-			if (cleaned) return cleaned;
+			// If the matched value is a URL (article:author), use it as url and keep looking for a name
+			// 如果匹配到的是 URL（article:author），保存为 url 并继续寻找显示名
+			if (/^https?:\/\//i.test(authorsString.trim())) {
+				authorUrl = authorUrl || authorsString.trim();
+			} else {
+				const cleaned = this.cleanAuthorString(authorsString);
+				if (cleaned) return { name: cleaned, ...(authorUrl ? { url: authorUrl } : {}) };
+			}
 		}
 
 		// Conventions for research paper meta tags
@@ -117,10 +132,16 @@ export class MetadataExtractor {
 				}
 				return s.trim();
 			}).join(', ');
-			return authorsString;
+			return { name: authorsString, ...(authorUrl ? { url: authorUrl } : {}) };
 		}
 
 		// 2. Schema.org data - deduplicate if it's a list
+		// Also extract author URL from schema.org / 同时从 schema.org 提取作者 URL
+		if (!authorUrl) {
+			authorUrl = this.getSchemaProperty(schemaOrgData, 'author.url') ||
+				this.getSchemaProperty(schemaOrgData, 'author.[].url') ||
+				undefined;
+		}
 		let schemaAuthors = this.getSchemaProperty(schemaOrgData, 'author.name') ||
 			this.getSchemaProperty(schemaOrgData, 'author.[].name');
 		
@@ -133,7 +154,7 @@ export class MetadataExtractor {
 				if (uniqueSchemaAuthors.length > 10) {
 					uniqueSchemaAuthors = uniqueSchemaAuthors.slice(0, 10);
 				}
-				return uniqueSchemaAuthors.join(', ');
+				return { name: uniqueSchemaAuthors.join(', '), ...(authorUrl ? { url: authorUrl } : {}) };
 			}
 		}
 
@@ -152,7 +173,7 @@ export class MetadataExtractor {
 				}
 			});
 			const uniqueRelNames = [...new Set(relNames)];
-			if (uniqueRelNames.length > 0) return uniqueRelNames.join(', ');
+			if (uniqueRelNames.length > 0) return { name: uniqueRelNames.join(', '), ...(authorUrl ? { url: authorUrl } : {}) };
 		}
 
 		const collectedAuthorsFromDOM: string[] = [];
@@ -179,7 +200,16 @@ export class MetadataExtractor {
 		for (const { selector, maxMatches } of domAuthorSelectors) {
 			const matches = doc.querySelectorAll(selector);
 			if (maxMatches && matches.length > maxMatches) continue;
-			matches.forEach(el => addDomAuthor(this.getAuthorName(el)));
+			matches.forEach(el => {
+				addDomAuthor(this.getAuthorName(el));
+				// Capture author URL from link elements / 从链接元素捕获作者 URL
+				if (!authorUrl && el instanceof HTMLAnchorElement && el.href) {
+					authorUrl = el.href;
+				} else if (!authorUrl && el.querySelector('a[href]')) {
+					const link = el.querySelector('a[href]');
+					if (link) authorUrl = link.getAttribute('href') || undefined;
+				}
+			});
 		}
 
 		if (collectedAuthorsFromDOM.length > 0) {
@@ -194,7 +224,7 @@ export class MetadataExtractor {
 				if (uniqueAuthors.length > 10) {
 					uniqueAuthors = uniqueAuthors.slice(0, 10);
 				}
-				return uniqueAuthors.join(', ');
+				return { name: uniqueAuthors.join(', '), ...(authorUrl ? { url: authorUrl } : {}) };
 			}
 		}
 
@@ -217,7 +247,7 @@ export class MetadataExtractor {
 					if (links.length === 1) {
 						const linkText = (links[0].textContent?.trim() || '').replace(/\u00a0/g, ' ');
 						if (linkText.length > 0 && linkText.length < 100 && !this.parseDateText(linkText)) {
-							return linkText;
+							return { name: linkText, ...(authorUrl ? { url: authorUrl } : {}) };
 						}
 					}
 					// Check for plain-text author in a non-date <p> child.
@@ -229,7 +259,7 @@ export class MetadataExtractor {
 							if (p.tagName !== 'P') continue;
 							const pText = (p.textContent?.trim() || '').replace(/\u00a0/g, ' ');
 							if (pText.length > 0 && pText.length < 150 && !this.parseDateText(pText)) {
-								return pText;
+								return { name: pText, ...(authorUrl ? { url: authorUrl } : {}) };
 							}
 						}
 					}
@@ -245,21 +275,21 @@ export class MetadataExtractor {
 				// Check a few siblings before
 				for (let i = 0; i < 3 && bylineCandidate; i++) {
 					const bylineResult = this.extractByline(bylineCandidate);
-					if (bylineResult) return bylineResult;
+					if (bylineResult) return { name: bylineResult, ...(authorUrl ? { url: authorUrl } : {}) };
 					bylineCandidate = bylineCandidate.previousElementSibling;
 				}
 				// Check a few siblings after
 				bylineCandidate = bylineScope.nextElementSibling;
 				for (let i = 0; i < 3 && bylineCandidate; i++) {
 					const bylineResult = this.extractByline(bylineCandidate);
-					if (bylineResult) return bylineResult;
+					if (bylineResult) return { name: bylineResult, ...(authorUrl ? { url: authorUrl } : {}) };
 					bylineCandidate = bylineCandidate.nextElementSibling;
 				}
 				bylineScope = bylineScope.parentElement;
 			}
 		}
 
-		return '';
+		return { name: '' };
 	}
 
 	private static extractByline(el: Element): string | null {
